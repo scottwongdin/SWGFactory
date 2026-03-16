@@ -88,6 +88,15 @@
     border-bottom: 1px solid var(--border);
     background: var(--surface2);
   }
+  .drag-handle {
+    cursor: grab; color: var(--muted2); font-size: 14px; line-height: 1;
+    padding: 2px 2px; flex-shrink: 0; user-select: none;
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .drag-handle span { display: block; width: 14px; height: 1.5px; background: currentColor; border-radius: 1px; }
+  .drag-handle:active { cursor: grabbing; }
+  .line-card.dragging { opacity: 0.4; }
+  .line-card.drag-over { border-color: var(--accent); border-style: dashed; }
   .line-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
   .line-name-input {
     background: none; border: none; color: var(--text);
@@ -316,17 +325,14 @@ function resetLine(id) {
 }
 
 function saveRunToHistory(line) {
-  const ul = u => u==='sec'?'s':u==='min'?'min':'hr';
+  const exists = state.history.some(h => h.product === (line.product || ''));
+  if (exists) return;
   state.history.unshift({
     id: uid(),
-    lineName: line.name,
-    completedAt: Date.now(),
-    totalSec: line.totalSec,
-    qty: line.qty,
+    product: line.product || '',
     tpu: line.tpu,
     unit: line.unit,
-    summary: (line.product ? line.product + ' — ' : '') + line.qty.toLocaleString() + ' units @ ' + line.tpu + ' ' + ul(line.unit) + '/unit',
-    product: line.product || ''
+    qty: line.qty
   });
   if (state.history.length > 50) state.history = state.history.slice(0,50);
   saveState();
@@ -338,7 +344,7 @@ function resubmitRun(histId) {
   const idx = state.lines.length;
   state.lines.push({
     id: uid(),
-    name: h.lineName,
+    name: 'Factory ' + (idx+1),
     colorIdx: idx % LINE_COLORS.length,
     tpu: h.tpu, unit: h.unit, qty: h.qty, product: h.product || '',
     status: 'idle',
@@ -409,8 +415,8 @@ function renderLineCard(id) {
 
 function buildHistoryOptions() {
   if (state.history.length === 0) return '';
-  const opts = state.history.map(h =>
-    `<option value="${h.id}">${h.lineName}${h.product ? ' — '+h.product : ''} (${h.qty} @ ${h.tpu}${h.unit==='sec'?'s':h.unit==='min'?'min':'hr'})</option>`
+  const opts = sortedHistory().map(h =>
+    `<option value="${h.id}">${h.product || '(no product)'}</option>`
   ).join('');
   return `<div style="margin-bottom:0.75rem;">
     <div class="field">
@@ -428,6 +434,7 @@ function buildLineHTML(line) {
   const ul = u => u==='sec'?'s':u==='min'?'min':'hr';
   return `<div class="line-card" id="line-${line.id}">
     <div class="line-header">
+      <div class="drag-handle" title="Drag to reorder"><span></span><span></span><span></span></div>
       <div class="line-dot" style="background:${color}"></div>
       <input class="line-name-input" value="${line.name}" onchange="renameLine('${line.id}',this.value)" />
       <span class="line-status">${line.status}</span>
@@ -486,31 +493,63 @@ function renderLines() {
   }
   grid.innerHTML = state.lines.map(buildLineHTML).join('');
   state.lines.forEach(line => { renderLineCard(line.id); });
+  initDragDrop();
+}
+
+let dragSrcId = null;
+
+function initDragDrop() {
+  const cards = document.querySelectorAll('.line-card');
+  cards.forEach(card => {
+    card.setAttribute('draggable', 'true');
+    card.addEventListener('dragstart', e => {
+      dragSrcId = card.id.replace('line-', '');
+      card.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      document.querySelectorAll('.line-card').forEach(c => c.classList.remove('drag-over'));
+    });
+    card.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.line-card').forEach(c => c.classList.remove('drag-over'));
+      card.classList.add('drag-over');
+    });
+    card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+    card.addEventListener('drop', e => {
+      e.preventDefault();
+      card.classList.remove('drag-over');
+      const dropId = card.id.replace('line-', '');
+      if (!dragSrcId || dragSrcId === dropId) return;
+      const srcIdx = state.lines.findIndex(l => l.id === dragSrcId);
+      const dstIdx = state.lines.findIndex(l => l.id === dropId);
+      const [moved] = state.lines.splice(srcIdx, 1);
+      state.lines.splice(dstIdx, 0, moved);
+      saveState();
+      renderLines();
+    });
+  });
+}
+
+function sortedHistory() {
+  return [...state.history].sort((a, b) => (a.product||'').localeCompare(b.product||''));
 }
 
 function renderHistory() {
   const el = document.getElementById('history-container');
   if (state.history.length === 0) {
-    el.innerHTML = '<div class="history-empty">No completed runs yet.<br>Start a factory and it will appear here when done.</div>';
+    el.innerHTML = '<div class="history-empty">No products yet.<br>Start a factory run and it will appear here.</div>';
     return;
   }
-  el.innerHTML = '<div class="history-list">' + state.history.map(h => `
+  el.innerHTML = '<div class="history-list">' + sortedHistory().map(h => `
     <div class="history-card">
       <div class="history-card-header">
-        <div>
-          <div class="history-name">${h.lineName}</div>
-          <div class="history-date">${fmtDate(h.completedAt)} at ${fmtTime(h.completedAt)}</div>
-        </div>
+        <div class="history-name">${h.product || '(no product)'}</div>
         <div class="history-actions">
-          <button class="btn btn-sm" data-resubmit="${h.id}">Resubmit ↗</button>
+          <button class="btn btn-sm" data-resubmit="${h.id}">Load ↗</button>
           <button class="btn btn-sm btn-danger" data-delete="${h.id}">Delete</button>
-        </div>
-      </div>
-      <div class="history-body">
-        <div class="history-jobs">${h.summary||''}</div>
-        <div class="history-meta">
-          <span>Total units: <strong>${(h.qty||0).toLocaleString()}</strong></span>
-          <span>Run time: <strong>${fmtDur(h.totalSec)}</strong></span>
         </div>
       </div>
     </div>
@@ -552,8 +591,6 @@ document.getElementById('lines-grid').addEventListener('click', e => {
     document.getElementById('tpu-'+lineId).value = h.tpu || '';
     document.getElementById('qty-'+lineId).value = h.qty || '';
     document.getElementById('unit-'+lineId).value = h.unit || 'sec';
-    document.querySelector('#line-'+lineId+' .line-name-input').value = h.lineName;
-    renameLine(lineId, h.lineName);
   }
 });
 
